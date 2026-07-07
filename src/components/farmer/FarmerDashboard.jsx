@@ -9,9 +9,10 @@ import {
   ChevronRight, Map, Search, Filter
 } from 'lucide-react';
 import {
-  collection, query, onSnapshot, orderBy, limit, where
+  collection, query, onSnapshot, orderBy, limit, where, addDoc, Timestamp, doc
 } from 'firebase/firestore';
-import { db } from '../../firebase';
+import { ref, onValue } from 'firebase/database';
+import { db, rtdb } from '../../firebase';
 
 import AnimalsTab   from './AnimalsTab';
 import MonitoringTab from './MonitoringTab';
@@ -44,6 +45,13 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
   const [latestGps,      setLatestGps]      = useState({});
   const [latestAI,       setLatestAI]       = useState({});
   const [loading,        setLoading]        = useState(true);
+  const [sysConfig,      setSysConfig]      = useState(null);
+  const [laptopCoords,   setLaptopCoords]   = useState(null);
+
+  const overviewMapContainerRef = React.useRef(null);
+  const overviewMapInstanceRef = React.useRef(null);
+  const overviewMarkersRef = React.useRef({});
+  const overviewCircleRef = React.useRef(null);
 
   // ── 1. Animals ─────────────────────────────────────────────
   useEffect(() => {
@@ -101,6 +109,308 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
     return onSnapshot(collection(db, 'geofences'), s => setGeofences(s.docs.map(d => ({ docId: d.id, ...d.data() }))));
   }, []);
 
+  // ── 7.5. System Config ─────────────────────────────────────
+  useEffect(() => {
+    return onSnapshot(doc(db, 'system_config', 'global'), (snap) => {
+      if (snap.exists()) {
+        setSysConfig(snap.data());
+      }
+    });
+  }, []);
+
+  // ── 7.6. Laptop Geolocation ────────────────────────────────
+  useEffect(() => {
+    const getPos = () => {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            setLaptopCoords({
+              lat: position.coords.latitude,
+              lng: position.coords.longitude
+            });
+          },
+          (error) => {
+            console.warn("Could not retrieve laptop geolocation:", error);
+          },
+          { enableHighAccuracy: true }
+        );
+      }
+    };
+    getPos();
+    const interval = setInterval(getPos, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── 7.7. Overview Leaflet Map ──────────────────────────────
+  useEffect(() => {
+    // Only initialize if tab is overview and element is rendered
+    if (activeTab !== 'overview' || !overviewMapContainerRef.current) {
+      if (overviewMapInstanceRef.current) {
+        overviewMapInstanceRef.current.remove();
+        overviewMapInstanceRef.current = null;
+        overviewCircleRef.current = null;
+        overviewMarkersRef.current = {};
+      }
+      return;
+    }
+    if (!window.L) return;
+
+    const center = laptopCoords || { lat: 7.291, lng: 80.633 };
+
+    if (!overviewMapInstanceRef.current) {
+      const map = window.L.map(overviewMapContainerRef.current, {
+        zoomControl: false, // hide zoom controls on overview map
+        attributionControl: false
+      }).setView([center.lat, center.lng], 14);
+
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19
+      }).addTo(map);
+
+      overviewMapInstanceRef.current = map;
+    }
+
+    const map = overviewMapInstanceRef.current;
+
+    // Pan map to new center coordinates if laptop base location changes
+    map.panTo([center.lat, center.lng]);
+
+    // Redraw geofence circle
+    if (overviewCircleRef.current) {
+      overviewCircleRef.current.remove();
+    }
+    overviewCircleRef.current = window.L.circle([center.lat, center.lng], {
+      color: '#ef4444',
+      fillColor: '#ef4444',
+      fillOpacity: 0.05,
+      radius: sysConfig?.geofenceBounds?.radius ?? 200,
+      weight: 1.5,
+      dashArray: '5, 5'
+    }).addTo(map);
+
+  }, [activeTab, laptopCoords, sysConfig]);
+
+  // Update overview markers
+  useEffect(() => {
+    const map = overviewMapInstanceRef.current;
+    if (!map || activeTab !== 'overview' || !window.L) return;
+
+    // Remove obsolete markers
+    Object.keys(overviewMarkersRef.current).forEach(id => {
+      if (!animals.some(a => a.docId === id)) {
+        overviewMarkersRef.current[id].remove();
+        delete overviewMarkersRef.current[id];
+      }
+    });
+
+    // Add or update markers
+    animals.forEach(a => {
+      const g = latestGps[a.docId] || {};
+      if (!g.latitude || !g.longitude) return;
+
+      const lat = g.latitude;
+      const lng = g.longitude;
+      const hc = a.healthStatus === 'critical' ? 'critical' : a.healthStatus === 'at_risk' ? 'warning' : 'healthy';
+
+      const customIcon = window.L.divIcon({
+        className: 'custom-leaflet-pin',
+        html: `
+          <div class="map-animal-pin ${hc}" style="position: relative;">
+            <span class="pin-pulse"></span>
+            <span class="pin-center-dot"></span>
+            <span class="pin-label-pop" style="visibility: visible; opacity: 1; transform: translate(-50%, -100%) translateY(-6px);">${a.name}</span>
+          </div>
+        `,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      if (overviewMarkersRef.current[a.docId]) {
+        overviewMarkersRef.current[a.docId].setLatLng([lat, lng]);
+        overviewMarkersRef.current[a.docId].setIcon(customIcon);
+      } else {
+        const marker = window.L.marker([lat, lng], { icon: customIcon })
+          .addTo(map)
+          .on('click', () => setActiveTab('gps')); // Go to full map when clicked
+        overviewMarkersRef.current[a.docId] = marker;
+      }
+    });
+  }, [activeTab, animals, latestGps]);
+
+  // Ref to track last sync times (throttling Firestore writes to save quota)
+  const lastSyncTimes = React.useRef({});
+
+  // Geofence checker helper using laptop coordinates as center and admin configured radius
+  const checkGeofence = (lat, lng) => {
+    const centerLat = laptopCoords?.lat ?? sysConfig?.geofenceBounds?.centerLat ?? 7.291;
+    const centerLng = laptopCoords?.lng ?? sysConfig?.geofenceBounds?.centerLng ?? 80.633;
+    const radiusMeters = sysConfig?.geofenceBounds?.radius ?? 200;
+
+    const R = 6371e3; // Earth radius in meters
+    const phi1 = lat * Math.PI / 180;
+    const phi2 = centerLat * Math.PI / 180;
+    const deltaPhi = (centerLat - lat) * Math.PI / 180;
+    const deltaLambda = (centerLng - lng) * Math.PI / 180;
+
+    const a = Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+              Math.cos(phi1) * Math.cos(phi2) *
+              Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const distance = R * c;
+
+    return distance <= radiusMeters;
+  };
+
+  // Evaluate and trigger alerts based on telemetry
+  const evaluateAlerts = async (animal, vitals, gpsLoc) => {
+    let severity = null;
+    let type = null;
+    let message = '';
+
+    if (vitals.bodyTemperature > 39.8) {
+      severity = 'critical';
+      type = 'high_temp';
+      message = `${animal.name} has a critical high temperature of ${vitals.bodyTemperature}°C! Suspected fever or heat stress.`;
+    } else if (vitals.bodyTemperature < 37.8) {
+      severity = 'warning';
+      type = 'low_temp';
+      message = `${animal.name} has a low temperature of ${vitals.bodyTemperature}°C. Monitor behavior closely.`;
+    }
+
+    if (gpsLoc.latitude && gpsLoc.longitude) {
+      const inside = checkGeofence(gpsLoc.latitude, gpsLoc.longitude);
+      if (!inside) {
+        severity = 'critical';
+        type = 'geofence_violation';
+        message = `${animal.name} [Tag: ${animal.tagNumber}] has breached the geofence boundary!`;
+      }
+    }
+
+    if (severity && type) {
+      // Check if there is already an active alert of this type for this animal to avoid duplicates
+      const dup = alerts.find(al => al.animalId === animal.docId && al.alertType === type && al.status === 'active');
+      if (!dup) {
+        await addDoc(collection(db, 'alerts'), {
+          animalId: animal.docId,
+          animalName: animal.name,
+          tagNumber: animal.tagNumber,
+          alertType: type,
+          severity,
+          message,
+          status: 'active',
+          isRead: false,
+          isResolved: false,
+          triggeredAt: Timestamp.now()
+        });
+      }
+    }
+  };
+
+  // ── 8. Realtime Database listener for ESP32 ─────────────────
+  useEffect(() => {
+    if (animals.length === 0) return;
+
+    const activeRTDBListeners = [];
+
+    animals.forEach(a => {
+      if (!a.deviceId) return; // e.g. "ESP32-A02" or a custom device ID
+
+      // Resolve the MAC address from the devices list if possible
+      const deviceDoc = devices.find(d => d.deviceId === a.deviceId || d.docId === a.deviceId);
+      const listenerKey = deviceDoc?.macAddress ? deviceDoc.macAddress.toUpperCase().trim() : a.deviceId;
+
+      const deviceRef = ref(rtdb, `livestock/${listenerKey}/latest`);
+      
+      const unsubscribe = onValue(deviceRef, async (snapshot) => {
+        if (!snapshot.exists()) return;
+        const val = snapshot.val();
+        
+        const temp = val.temperature || 38.5;
+        const ax = val.accelerometer?.x || 0;
+        const ay = val.accelerometer?.y || 0;
+        const az = val.accelerometer?.z || 0;
+
+        // activity level based on magnitude
+        const magnitude = Math.sqrt(ax * ax + ay * ay + az * az);
+        let activity = 'resting';
+        let stepIncrement = 0;
+        let heartRate = Math.floor(65 + (temp - 38.5) * 8);
+
+        if (magnitude > 25000) {
+          activity = 'running';
+          stepIncrement = 3;
+          heartRate += 25;
+        } else if (magnitude > 16000) {
+          activity = 'walking';
+          stepIncrement = 1;
+          heartRate += 12;
+        }
+        heartRate = Math.max(55, Math.min(115, heartRate));
+
+        const prevSteps = latestReadings[a.docId]?.stepCount || 120;
+        const newSteps = prevSteps + stepIncrement;
+
+        const timestampDate = val.timestamp ? new Date(val.timestamp) : new Date();
+
+        const readingData = {
+          bodyTemperature: parseFloat(temp.toFixed(1)),
+          heartRate,
+          activityLevel: activity,
+          stepCount: newSteps,
+          accelerometerX: parseFloat((ax / 16384.0).toFixed(2)),
+          accelerometerY: parseFloat((ay / 16384.0).toFixed(2)),
+          accelerometerZ: parseFloat((az / 16384.0).toFixed(2)),
+          batteryLevel: 85,
+          sensorStatus: 'connected',
+          isBuffered: false,
+          timestamp: Timestamp.fromDate(timestampDate)
+        };
+
+        // Update dynamic readings state in-memory
+        setLatestReadings(prev => ({ ...prev, [a.docId]: readingData }));
+
+        // Map and update GPS state if gps object exists
+        let gpsLoc = {};
+        if (val.gps?.latitude && val.gps?.longitude) {
+          const isInside = checkGeofence(val.gps.latitude, val.gps.longitude);
+          gpsLoc = {
+            latitude: val.gps.latitude,
+            longitude: val.gps.longitude,
+            altitude: 512,
+            speed: activity === 'resting' ? 0.0 : activity === 'walking' ? 0.8 : 2.5,
+            accuracy: 3.5,
+            isInsideGeofence: isInside,
+            timestamp: Timestamp.fromDate(timestampDate)
+          };
+          setLatestGps(prev => ({ ...prev, [a.docId]: gpsLoc }));
+
+          // Save GPS to Firestore history (throttle to once per 15s)
+          const nowMs = Date.now();
+          const lastGpsSync = lastSyncTimes.current[`gps-${a.docId}`] || 0;
+          if (nowMs - lastGpsSync > 15000) {
+            lastSyncTimes.current[`gps-${a.docId}`] = nowMs;
+            await addDoc(collection(db, 'animals', a.docId, 'gps_locations'), gpsLoc);
+          }
+        }
+
+        // Save Vitals to Firestore history (throttle to once per 15s)
+        const nowMs = Date.now();
+        const lastVitalsSync = lastSyncTimes.current[`vitals-${a.docId}`] || 0;
+        if (nowMs - lastVitalsSync > 15000) {
+          lastSyncTimes.current[`vitals-${a.docId}`] = nowMs;
+          await addDoc(collection(db, 'animals', a.docId, 'sensor_readings'), readingData);
+          await evaluateAlerts(a, readingData, val.gps || {});
+        }
+      });
+
+      activeRTDBListeners.push({ deviceId: a.deviceId, unsubscribe });
+    });
+
+    return () => {
+      activeRTDBListeners.forEach(l => l.unsubscribe());
+    };
+  }, [animals, alerts, devices, laptopCoords, sysConfig]);
+
   // ── Computed values for Overview tab ──────────────────────
   const totalAnimals = animals.length;
   const unreadAlerts = alerts.filter(a => !a.isRead).length;
@@ -117,13 +427,6 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
     return acc;
   }, { healthy: 0, warning: 0, critical: 0 });
 
-  const MIN_LAT = 7.280, MAX_LAT = 7.300, MIN_LNG = 80.625, MAX_LNG = 80.645;
-  const toMapCoords = (lat, lng) => {
-    if (!lat || !lng) return { x: '50%', y: '50%' };
-    const x = Math.min(Math.max(((lng - MIN_LNG) / (MAX_LNG - MIN_LNG)) * 100, 2), 96);
-    const y = Math.min(Math.max(100 - (((lat - MIN_LAT) / (MAX_LAT - MIN_LAT)) * 100), 4), 92);
-    return { x: `${x}%`, y: `${y}%` };
-  };
   const hClass = (s) => s === 'critical' ? 'critical' : s === 'at_risk' ? 'warning' : 'healthy';
   const fmtTime = (ts) => {
     if (!ts) return '—';
@@ -288,25 +591,18 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
                   <div className="title-block"><Map size={18} color="var(--primary)" /><h4>Live GPS Overview</h4></div>
                   <button className="btn-logout" style={{ fontSize: '0.72rem', padding: '0.3rem 0.7rem' }} onClick={() => setActiveTab('gps')}>Full Map →</button>
                 </div>
-                <div className="gps-map-container">
-                  <div className="map-grid-layer">
-                    <div className="scan-line"></div>
-                    <div className="boundary-marker">Green Valley Farm — {totalAnimals} Animals Tracked</div>
-                    {animals.map(a => {
-                      const g = latestGps[a.docId] || {};
-                      const coords = toMapCoords(g.latitude, g.longitude);
-                      return (
-                        <button key={a.docId} className={`map-animal-pin ${hClass(a.healthStatus)}`}
-                          style={{ left: coords.x, top: coords.y }} title={a.name}
-                          onClick={() => setActiveTab('gps')}>
-                          <span className="pin-pulse"></span>
-                          <span className="pin-center-dot"></span>
-                          <span className="pin-label-pop">{a.name}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="map-help-tip">Click animals on the map or go to GPS & Geofence tab for full tracking</div>
+                <div className="gps-map-container" style={{ padding: 0 }}>
+                  <div 
+                    ref={overviewMapContainerRef} 
+                    style={{ 
+                      height: '240px', 
+                      width: '100%', 
+                      borderRadius: '12px',
+                      position: 'relative',
+                      zIndex: 1
+                    }} 
+                  />
+                  <div className="map-help-tip">Click pins to go to the interactive map or go to GPS & Geofence tab for full tracking</div>
                 </div>
               </div>
 
@@ -402,7 +698,13 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
           <AIHealthTab animals={animals} latestAI={latestAI} />
         )}
         {activeTab === 'gps' && (
-          <GPSTab animals={animals} latestGps={latestGps} geofences={geofences} />
+          <GPSTab 
+            animals={animals} 
+            latestGps={latestGps} 
+            geofences={geofences} 
+            laptopCoords={laptopCoords}
+            geofenceRadius={sysConfig?.geofenceBounds?.radius ?? 200}
+          />
         )}
         {activeTab === 'alerts' && (
           <AlertsTab alerts={alerts} />

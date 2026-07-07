@@ -29,6 +29,7 @@ export default function AnimalsTab({ animals, devices, farmerId }) {
   const [activeSubTab, setActiveSubTab] = useState('vaccinations');
   const [saving, setSaving]             = useState(false);
   const [msg, setMsg]                   = useState('');
+  const [isCustomDevice, setIsCustomDevice] = useState(false);
 
   // Load sub-records when an animal is expanded
   useEffect(() => {
@@ -46,15 +47,32 @@ export default function AnimalsTab({ animals, devices, farmerId }) {
     (a.species || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const openAdd = () => { setForm(EMPTY_FORM); setEditingId(null); setShowForm(true); };
+  const openAdd = () => {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setIsCustomDevice(false);
+    setShowForm(true);
+  };
   const openEdit = (a) => {
+    const isCustom = a.deviceId && !devices.some(d => (d.deviceId || d.docId) === a.deviceId);
     setForm({
       name: a.name || '', tagNumber: a.tagNumber || '', species: a.species || 'Cattle',
       breed: a.breed || '', gender: a.gender || 'female',
       weight: a.weight || '', color: a.color || '', deviceId: a.deviceId || ''
     });
     setEditingId(a.docId);
+    setIsCustomDevice(isCustom);
     setShowForm(true);
+  };
+
+  const handleDeviceChange = (val) => {
+    if (val === "__custom__") {
+      setIsCustomDevice(true);
+      setForm({ ...form, deviceId: "" });
+    } else {
+      setIsCustomDevice(false);
+      setForm({ ...form, deviceId: val });
+    }
   };
 
   const handleSave = async (e) => {
@@ -172,16 +190,26 @@ export default function AnimalsTab({ animals, devices, farmerId }) {
               <div className="form-group" style={{ marginBottom: 0 }}>
                 <div className="input-container">
                   <select className="form-input" style={{ ...inputStyle, appearance: 'none' }}
-                    value={form.deviceId} onChange={e => setForm({ ...form, deviceId: e.target.value })}>
+                    value={isCustomDevice ? "__custom__" : form.deviceId} onChange={e => handleDeviceChange(e.target.value)}>
                     <option value="">-- Assign IoT Collar (FR-F11) --</option>
                     {devices.map(d => (
                       <option key={d.docId} value={d.deviceId || d.docId}>
                         {d.deviceId || d.docId} — {d.macAddress} ({d.status})
                       </option>
                     ))}
+                    <option value="__custom__">⚙️ Enter Custom Device ID...</option>
                   </select>
                 </div>
               </div>
+              {isCustomDevice && (
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <div className="input-container">
+                    <input type="text" className="form-input" style={inputStyle} placeholder=" "
+                      value={form.deviceId} onChange={e => setForm({ ...form, deviceId: e.target.value })} required />
+                    <label className="floating-label" style={{ left: '1rem' }}>Enter Device ID (e.g. cow_01)</label>
+                  </div>
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
               <button type="submit" className="btn-primary" disabled={saving}>

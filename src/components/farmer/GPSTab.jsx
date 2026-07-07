@@ -1,14 +1,20 @@
 // GPSTab.jsx — FR-F30 to FR-F33
 // Live location, movement history, geofence boundary, locate missing animals
-import React, { useState, useEffect } from 'react';
-import { MapPin, Navigation, AlertTriangle, Clock, Map } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { MapPin, Navigation, AlertTriangle, Clock, Map as MapIcon } from 'lucide-react';
 import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 
-export default function GPSTab({ animals, latestGps, geofences }) {
+export default function GPSTab({ animals, latestGps, geofences, laptopCoords, geofenceRadius }) {
   const [selectedAnimal, setSelectedAnimal] = useState(null);
   const [gpsHistory, setGpsHistory]         = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef({});
+  const circleRef = useRef(null);
+  const laptopMarkerRef = useRef(null);
 
   // FR-F31: Load movement history for selected animal
   useEffect(() => {
@@ -26,6 +32,132 @@ export default function GPSTab({ animals, latestGps, geofences }) {
     return () => unsub();
   }, [selectedAnimal?.docId]);
 
+  // Leaflet Map Initialization and Geofence Circle Setup
+  useEffect(() => {
+    if (!mapContainerRef.current) return;
+    if (!window.L) {
+      console.warn("Leaflet library not loaded yet.");
+      return;
+    }
+
+    const center = laptopCoords || { lat: 7.291, lng: 80.633 };
+
+    if (!mapInstanceRef.current) {
+      // Initialize map instance
+      const map = window.L.map(mapContainerRef.current, {
+        zoomControl: true,
+        attributionControl: false
+      }).setView([center.lat, center.lng], 15);
+
+      // Add OpenStreetMap tiles
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19
+      }).addTo(map);
+
+      mapInstanceRef.current = map;
+    }
+
+    const map = mapInstanceRef.current;
+
+    // Pan map to new center coordinates if laptop base location changes
+    map.panTo([center.lat, center.lng]);
+
+    // Redraw geofence circle around the laptop base location
+    if (circleRef.current) {
+      circleRef.current.remove();
+    }
+    circleRef.current = window.L.circle([center.lat, center.lng], {
+      color: '#ef4444',
+      fillColor: '#ef4444',
+      fillOpacity: 0.08,
+      radius: geofenceRadius || 200,
+      weight: 1.5,
+      dashArray: '5, 5'
+    }).addTo(map);
+
+    // Redraw laptop beacon marker
+    if (laptopMarkerRef.current) {
+      laptopMarkerRef.current.remove();
+    }
+    const laptopIcon = window.L.divIcon({
+      className: 'custom-leaflet-pin',
+      html: `<div style="width: 14px; height: 14px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);"></div>`,
+      iconSize: [14, 14],
+      iconAnchor: [7, 7]
+    });
+    laptopMarkerRef.current = window.L.marker([center.lat, center.lng], { icon: laptopIcon })
+      .addTo(map)
+      .bindPopup('<b>Laptop Base Location (Geofence Center)</b>');
+
+  }, [laptopCoords, geofenceRadius]);
+
+  // Animal marker updates
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !window.L) return;
+
+    // Clear old markers no longer in current list
+    Object.keys(markersRef.current).forEach(id => {
+      if (!animals.some(a => a.docId === id)) {
+        markersRef.current[id].remove();
+        delete markersRef.current[id];
+      }
+    });
+
+    // Create or update marker per animal coordinates
+    animals.forEach(a => {
+      const g = latestGps[a.docId] || {};
+      if (!g.latitude || !g.longitude) return;
+
+      const lat = g.latitude;
+      const lng = g.longitude;
+      const hc = a.healthStatus === 'critical' ? 'critical' : a.healthStatus === 'at_risk' ? 'warning' : 'healthy';
+      const isSelected = selectedAnimal?.docId === a.docId;
+
+      const customIcon = window.L.divIcon({
+        className: 'custom-leaflet-pin',
+        html: `
+          <div class="map-animal-pin ${hc} ${isSelected ? 'selected' : ''}" style="position: relative;">
+            <span class="pin-pulse"></span>
+            <span class="pin-center-dot"></span>
+            <span class="pin-label-pop" style="visibility: visible; opacity: 1; transform: translate(-50%, -100%) translateY(-6px);">${a.name}</span>
+          </div>
+        `,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      if (markersRef.current[a.docId]) {
+        markersRef.current[a.docId].setLatLng([lat, lng]);
+        markersRef.current[a.docId].setIcon(customIcon);
+      } else {
+        const marker = window.L.marker([lat, lng], { icon: customIcon })
+          .addTo(map)
+          .on('click', () => setSelectedAnimal(a));
+        markersRef.current[a.docId] = marker;
+      }
+    });
+  }, [animals, latestGps, selectedAnimal]);
+
+  // Pan to selected animal coordinate change
+  useEffect(() => {
+    if (!selectedAnimal) return;
+    const g = latestGps[selectedAnimal.docId] || {};
+    if (g.latitude && g.longitude && mapInstanceRef.current) {
+      mapInstanceRef.current.setView([g.latitude, g.longitude], 16, { animate: true });
+    }
+  }, [selectedAnimal?.docId]);
+
+  // Clean map instance on unmount
+  useEffect(() => {
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
   const getGps = (id) => latestGps[id] || {};
 
   // FR-F33: Missing animals = outside geofence or no GPS data for >2hr
@@ -42,17 +174,6 @@ export default function GPSTab({ animals, latestGps, geofences }) {
     const d = ts.toDate ? ts.toDate() : new Date(ts);
     return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
-
-  // Simple CSS map with coordinate plotting (Sri Lanka region)
-  const MIN_LAT = 7.280, MAX_LAT = 7.300, MIN_LNG = 80.625, MAX_LNG = 80.645;
-  const toMapCoords = (lat, lng) => {
-    if (!lat || !lng) return { x: '50%', y: '50%' };
-    const x = Math.min(Math.max(((lng - MIN_LNG) / (MAX_LNG - MIN_LNG)) * 100, 2), 96);
-    const y = Math.min(Math.max(100 - (((lat - MIN_LAT) / (MAX_LAT - MIN_LAT)) * 100), 4), 92);
-    return { x: `${x}%`, y: `${y}%` };
-  };
-
-  const hClass = (s) => s === 'critical' ? 'critical' : s === 'at_risk' ? 'warning' : 'healthy';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -115,47 +236,20 @@ export default function GPSTab({ animals, latestGps, geofences }) {
           {/* FR-F32: GPS Map with geofence */}
           <div className="map-card-wrapper" style={{ padding: '1rem' }}>
             <h4 style={{ color: '#fff', fontFamily: 'var(--font-heading)', fontSize: '1rem', margin: '0 0 0.75rem 0' }}>
-              <Map size={16} color="var(--primary)" style={{ marginRight: '0.5rem' }} />FR-F32 Pasture Map & Geofence Boundary
+              <MapIcon size={16} color="var(--primary)" style={{ marginRight: '0.5rem' }} />FR-F32 Pasture Map & Geofence Boundary
             </h4>
-            <div className="gps-map-container" style={{ height: '260px' }}>
-              <div className="map-grid-layer">
-                <div className="scan-line"></div>
-                {/* Geofence circle visualization */}
-                {geofences.map(fence => (
-                  <div key={fence.docId} style={{
-                    position: 'absolute',
-                    left: '50%', top: '50%',
-                    width: '60%', height: '60%',
-                    transform: 'translate(-50%, -50%)',
-                    border: '2px dashed rgba(16,185,129,0.4)',
-                    borderRadius: '50%',
-                    pointerEvents: 'none'
-                  }}>
-                    <span style={{ position: 'absolute', top: '-1.2rem', left: '50%', transform: 'translateX(-50%)', fontSize: '0.6rem', color: 'var(--primary)', whiteSpace: 'nowrap' }}>{fence.name}</span>
-                  </div>
-                ))}
-                <div className="boundary-marker">Green Valley Farm — Geofence Active</div>
-                {/* Animal pins */}
-                {animals.map(a => {
-                  const g = getGps(a.docId);
-                  const coords = toMapCoords(g.latitude, g.longitude);
-                  const hc = hClass(a.healthStatus);
-                  const isSelected = selectedAnimal?.docId === a.docId;
-                  return (
-                    <button key={a.docId}
-                      className={`map-animal-pin ${hc} ${isSelected ? 'selected' : ''}`}
-                      style={{ left: coords.x, top: coords.y }}
-                      onClick={() => setSelectedAnimal(a)}
-                      title={a.name}
-                    >
-                      <span className="pin-pulse"></span>
-                      <span className="pin-center-dot"></span>
-                      <span className="pin-label-pop">{a.name}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            
+            {/* Interactive Leaflet Map Container */}
+            <div 
+              ref={mapContainerRef} 
+              style={{ 
+                height: '350px', 
+                width: '100%', 
+                borderRadius: '12px',
+                position: 'relative',
+                zIndex: 1
+              }} 
+            />
           </div>
 
           {/* FR-F31: Movement history for selected animal */}

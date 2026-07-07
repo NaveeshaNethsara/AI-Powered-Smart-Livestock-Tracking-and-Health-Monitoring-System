@@ -437,6 +437,17 @@ body {
   color: #ffffff;
   outline: none;
   transition: var(--transition-smooth);
+  color-scheme: dark;
+}
+
+/* Global Select Options Styling to fix white-on-white dark mode dropdown readability */
+select {
+  color-scheme: dark;
+}
+
+select option {
+  background-color: #070b15 !important; /* Matches main app dark background color */
+  color: #f3f4f6 !important; /* Light text for readability */
 }
 
 /* Add padding on right if there's a password toggle button */
@@ -1493,4 +1504,60 @@ body {
   color: var(--text-dark);
   display: block;
   margin-top: 0.1rem;
+}
+
+/* ── Leaflet Map premium dark theme styling ───────────────── */
+.leaflet-container {
+  background: #080c18 !important;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-glass) !important;
+  font-family: var(--font-sans) !important;
+}
+
+.leaflet-tile-container {
+  filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(90%);
+}
+
+.leaflet-bar {
+  border: 1px solid var(--border-glass) !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.leaflet-bar a {
+  background: rgba(12, 17, 30, 0.95) !important;
+  color: #fff !important;
+  border-bottom: 1px solid var(--border-glass) !important;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.leaflet-bar a:hover {
+  background: var(--primary) !important;
+  color: #000 !important;
+}
+
+.custom-leaflet-pin {
+  background: none !important;
+  border: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Fix popup design to match dark mode UI */
+.leaflet-popup-content-wrapper {
+  background: rgba(12, 17, 30, 0.95) !important;
+  border: 1px solid var(--border-glass) !important;
+  color: #fff !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-popup-tip {
+  background: rgba(12, 17, 30, 0.95) !important;
+  border: 1px solid var(--border-glass) !important;
 }
