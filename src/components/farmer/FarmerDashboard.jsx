@@ -6,10 +6,10 @@ import {
   Activity, LogOut, User, LayoutDashboard, PawPrint,
   MonitorCheck, Brain, MapPin, Bell, FileBarChart, UserCircle,
   Thermometer, Heart, Compass, AlertTriangle, CheckCircle2,
-  ChevronRight, Map, Search, Filter
+  ChevronRight, Map, Search, Filter, Cpu, Camera, Beaker, Stethoscope
 } from 'lucide-react';
 import {
-  collection, query, onSnapshot, orderBy, limit, where, addDoc, Timestamp, doc
+  collection, query, onSnapshot, orderBy, limit, where, addDoc, Timestamp, doc, setDoc
 } from 'firebase/firestore';
 import { ref, onValue } from 'firebase/database';
 import { db, rtdb } from '../../firebase';
@@ -21,16 +21,24 @@ import GPSTab       from './GPSTab';
 import AlertsTab    from './AlertsTab';
 import ReportsTab   from './ReportsTab';
 import ProfileTab   from './ProfileTab';
+import ActivityRecognitionTab from './ActivityRecognitionTab';
+import CVDiseaseTab      from './CVDiseaseTab';
+import SimulatorTab      from './SimulatorTab';
+import EarlyDetectionTab from './EarlyDetectionTab';
 
 const NAV_ITEMS = [
   { id: 'overview',    label: 'Overview',        Icon: LayoutDashboard },
   { id: 'animals',     label: 'My Animals',       Icon: PawPrint        },
   { id: 'monitoring',  label: 'Live Monitoring',  Icon: MonitorCheck    },
   { id: 'ai',          label: 'AI Health',        Icon: Brain           },
+  { id: 'activity_rec',label: 'Activity ML',      Icon: Cpu             },
+  { id: 'cv_disease',  label: 'CV Disease ML',    Icon: Camera          },
   { id: 'gps',         label: 'GPS & Geofence',   Icon: MapPin          },
-  { id: 'alerts',      label: 'Alerts',           Icon: Bell            },
-  { id: 'reports',     label: 'Reports',          Icon: FileBarChart    },
-  { id: 'profile',     label: 'My Profile',       Icon: UserCircle      },
+  { id: 'alerts',          label: 'Alerts',           Icon: Bell            },
+  { id: 'early_detection', label: 'Early Detection',  Icon: Stethoscope     },
+  { id: 'reports',         label: 'Reports',          Icon: FileBarChart    },
+  { id: 'simulator',       label: 'Simulator',        Icon: Beaker          },
+  { id: 'profile',         label: 'My Profile',       Icon: UserCircle      },
 ];
 
 export default function FarmerDashboard({ onLogout, userEmail, userId }) {
@@ -47,6 +55,29 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
   const [loading,        setLoading]        = useState(true);
   const [sysConfig,      setSysConfig]      = useState(null);
   const [laptopCoords,   setLaptopCoords]   = useState(null);
+  const [tick,           setTick]           = useState(0);
+
+  // ── Data Feeding Mode Switcher (Realtime IoT vs Simulator) ──
+  const [dataFeedingMode, setDataFeedingMode] = useState(() => {
+    return localStorage.getItem('livetrack_data_mode') || 'realtime';
+  });
+
+  const toggleDataFeedingMode = async (newMode) => {
+    setDataFeedingMode(newMode);
+    localStorage.setItem('livetrack_data_mode', newMode);
+    try {
+      await setDoc(doc(db, 'system_config', 'global'), {
+        dataFeedingMode: newMode
+      }, { merge: true });
+    } catch (err) {
+      console.warn("Could not sync dataFeedingMode to Firestore:", err);
+    }
+  };
+
+  const dataFeedingModeRef = React.useRef(dataFeedingMode);
+  useEffect(() => {
+    dataFeedingModeRef.current = dataFeedingMode;
+  }, [dataFeedingMode]);
 
   const overviewMapContainerRef = React.useRef(null);
   const overviewMapInstanceRef = React.useRef(null);
@@ -71,26 +102,60 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
 
   // ── 2. Sensor readings (latest per animal) ─────────────────
   const subscribeReadings = (id) => {
-    const q = query(collection(db, 'animals', id, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(1));
+    const q = query(collection(db, 'animals', id, 'sensor_readings'), orderBy('timestamp', 'desc'), limit(10));
     onSnapshot(q, s => {
-      if (!s.empty) setLatestReadings(p => ({ ...p, [id]: s.docs[0].data() }));
+      if (!s.empty) {
+        if (dataFeedingModeRef.current === 'simulator') {
+          const simDoc = s.docs.find(d => d.data().isSimulated);
+          if (simDoc) {
+            setLatestReadings(p => ({ ...p, [id]: simDoc.data() }));
+          }
+        } else {
+          setLatestReadings(p => ({ ...p, [id]: s.docs[0].data() }));
+        }
+      }
     });
   };
 
   // ── 3. GPS (latest per animal) ──────────────────────────────
   const subscribeGps = (id) => {
-    const q = query(collection(db, 'animals', id, 'gps_locations'), orderBy('timestamp', 'desc'), limit(1));
+    const q = query(collection(db, 'animals', id, 'gps_locations'), orderBy('timestamp', 'desc'), limit(10));
     onSnapshot(q, s => {
-      if (!s.empty) setLatestGps(p => ({ ...p, [id]: s.docs[0].data() }));
+      if (!s.empty) {
+        if (dataFeedingModeRef.current === 'simulator') {
+          const simDoc = s.docs.find(d => d.data().isSimulated);
+          if (simDoc) {
+            setLatestGps(p => ({ ...p, [id]: simDoc.data() }));
+          }
+        } else {
+          setLatestGps(p => ({ ...p, [id]: s.docs[0].data() }));
+        }
+      }
     });
   };
 
   // ── 4. AI predictions (latest per animal) ──────────────────
   const subscribeAI = (id) => {
-    const q = query(collection(db, 'animals', id, 'ai_predictions'), orderBy('timestamp', 'desc'), limit(1));
+    const q = query(collection(db, 'animals', id, 'ai_predictions'), orderBy('timestamp', 'desc'), limit(10));
     onSnapshot(q, s => {
-      if (!s.empty) setLatestAI(p => ({ ...p, [id]: s.docs[0].data() }));
+      if (!s.empty) {
+        if (dataFeedingModeRef.current === 'simulator') {
+          const simDoc = s.docs.find(d => d.data().isSimulated);
+          if (simDoc) {
+            setLatestAI(p => ({ ...p, [id]: simDoc.data() }));
+          }
+        } else {
+          setLatestAI(p => ({ ...p, [id]: s.docs[0].data() }));
+        }
+      }
     });
+  };
+
+  const handleSimulatedUpdate = (animalId, readingPayload, gpsPayload) => {
+    setLatestReadings(p => ({ ...p, [animalId]: readingPayload }));
+    if (gpsPayload) {
+      setLatestGps(p => ({ ...p, [animalId]: gpsPayload }));
+    }
   };
 
   // ── 5. Alerts ───────────────────────────────────────────────
@@ -102,6 +167,15 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
   // ── 6. Devices ──────────────────────────────────────────────
   useEffect(() => {
     return onSnapshot(collection(db, 'devices'), s => setDevices(s.docs.map(d => ({ docId: d.id, ...d.data() }))));
+  }, []);
+
+  // ── 6.5. Realtime Camera CV predictions ──────────────────────
+  const [cameraCvData, setCameraCvData] = useState(null);
+  useEffect(() => {
+    const camRef = ref(rtdb, 'animal_camera/latest');
+    return onValue(camRef, snap => {
+      if (snap.exists()) setCameraCvData(snap.val());
+    });
   }, []);
 
   // ── 7. Geofences ───────────────────────────────────────────
@@ -138,6 +212,12 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
     };
     getPos();
     const interval = setInterval(getPos, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── 7.8. Periodic UI tick for status checks ─────────────────
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -212,17 +292,22 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
       const lng = g.longitude;
       const hc = a.healthStatus === 'critical' ? 'critical' : a.healthStatus === 'at_risk' ? 'warning' : 'healthy';
 
+      const isInside = g.isInsideGeofence !== undefined ? g.isInsideGeofence : checkGeofence(lat, lng);
+      const pinColor = !isInside
+        ? '#ef4444'
+        : (a.healthStatus === 'critical' ? '#ef4444' : a.healthStatus === 'at_risk' ? '#f59e0b' : '#10b981');
+
       const customIcon = window.L.divIcon({
         className: 'custom-leaflet-pin',
         html: `
-          <div class="map-animal-pin ${hc}" style="position: relative;">
-            <span class="pin-pulse"></span>
-            <span class="pin-center-dot"></span>
-            <span class="pin-label-pop" style="visibility: visible; opacity: 1; transform: translate(-50%, -100%) translateY(-6px);">${a.name}</span>
+          <div class="leaflet-animal-pin" style="position: relative;">
+            <span class="pin-pulse" style="border: 2px solid ${pinColor}; animation: radar-ping 2s infinite;"></span>
+            <span class="pin-center-dot" style="background-color: ${pinColor} !important; border: 2px solid #ffffff; box-shadow: 0 0 10px ${pinColor};"></span>
+            <span class="pin-label-pop" style="visibility: visible !important; opacity: 1 !important; transform: translate(-50%, -100%) translateY(-8px) !important; background: rgba(12, 17, 30, 0.95) !important; color: #ffffff !important; border: 1px solid var(--border-glass) !important; font-weight: 700; padding: 3px 8px; border-radius: 6px; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.6); pointer-events: auto;">${a.name}</span>
           </div>
         `,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16]
+        iconSize: [36, 36],
+        iconAnchor: [18, 18]
       });
 
       if (overviewMarkersRef.current[a.docId]) {
@@ -235,7 +320,7 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
         overviewMarkersRef.current[a.docId] = marker;
       }
     });
-  }, [activeTab, animals, latestGps]);
+  }, [activeTab, animals, latestGps, tick]);
 
   // Ref to track last sync times (throttling Firestore writes to save quota)
   const lastSyncTimes = React.useRef({});
@@ -325,27 +410,72 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
         if (!snapshot.exists()) return;
         const val = snapshot.val();
         
+        // Read real-time heartRate from sensor if available and valid (> 0)
+        let heartRate = val.heartRate;
         const temp = val.temperature || 38.5;
         const ax = val.accelerometer?.x || 0;
         const ay = val.accelerometer?.y || 0;
         const az = val.accelerometer?.z || 0;
 
-        // activity level based on magnitude
+        // Process activity level: prefer backend ML classification, fallback to magnitude thresholds
+        let activity = val.activityLevel;
         const magnitude = Math.sqrt(ax * ax + ay * ay + az * az);
-        let activity = 'resting';
         let stepIncrement = 0;
-        let heartRate = Math.floor(65 + (temp - 38.5) * 8);
 
-        if (magnitude > 25000) {
-          activity = 'running';
-          stepIncrement = 3;
-          heartRate += 25;
-        } else if (magnitude > 16000) {
-          activity = 'walking';
-          stepIncrement = 1;
-          heartRate += 12;
+        if (heartRate === undefined || heartRate === null || heartRate <= 0) {
+          // Fallback to simulation/estimation if sensor is not present/active
+          heartRate = Math.floor(65 + (temp - 38.5) * 8);
+
+          // Normalize activity values to lowercase to match styling keys
+          if (activity) {
+            activity = activity.toLowerCase();
+          }
+
+          if (activity === 'running' || (!activity && magnitude > 25000)) {
+            activity = 'running';
+            stepIncrement = 3;
+            heartRate += 25;
+          } else if (activity === 'walking' || (!activity && magnitude > 16000)) {
+            activity = 'walking';
+            stepIncrement = 1;
+            heartRate += 12;
+          } else if (activity === 'sleeping') {
+            activity = 'sleeping';
+            heartRate -= 10;
+          } else if (activity === 'standing') {
+            activity = 'standing';
+          } else if (activity === 'resting') {
+            activity = 'resting';
+          } else if (activity === 'abnormal movement') {
+            activity = 'abnormal movement';
+            heartRate += 15;
+          } else {
+            activity = 'resting';
+          }
+          heartRate = Math.max(55, Math.min(115, heartRate));
+        } else {
+          // If using actual heart rate sensor, we still calculate step count based on activity
+          if (activity) {
+            activity = activity.toLowerCase();
+          }
+          if (activity === 'running' || (!activity && magnitude > 25000)) {
+            activity = 'running';
+            stepIncrement = 3;
+          } else if (activity === 'walking' || (!activity && magnitude > 16000)) {
+            activity = 'walking';
+            stepIncrement = 1;
+          } else if (activity === 'sleeping') {
+            activity = 'sleeping';
+          } else if (activity === 'standing') {
+            activity = 'standing';
+          } else if (activity === 'resting') {
+            activity = 'resting';
+          } else if (activity === 'abnormal movement') {
+            activity = 'abnormal movement';
+          } else {
+            activity = 'resting';
+          }
         }
-        heartRate = Math.max(55, Math.min(115, heartRate));
 
         const prevSteps = latestReadings[a.docId]?.stepCount || 120;
         const newSteps = prevSteps + stepIncrement;
@@ -355,6 +485,7 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
         const readingData = {
           bodyTemperature: parseFloat(temp.toFixed(1)),
           heartRate,
+          isRealHeartRate: val.heartRate > 0,
           activityLevel: activity,
           stepCount: newSteps,
           accelerometerX: parseFloat((ax / 16384.0).toFixed(2)),
@@ -426,6 +557,12 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
     else if (a.healthStatus === 'critical') acc.critical++;
     return acc;
   }, { healthy: 0, warning: 0, critical: 0 });
+
+  const anyDeviceOnline = Object.values(latestReadings).some(r => {
+    if (!r.timestamp) return false;
+    const ts = r.timestamp.toDate ? r.timestamp.toDate() : new Date(r.timestamp);
+    return (Date.now() - ts.getTime()) < 15000;
+  });
 
   const hClass = (s) => s === 'critical' ? 'critical' : s === 'at_risk' ? 'warning' : 'healthy';
   const fmtTime = (ts) => {
@@ -520,22 +657,127 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
       {/* ── Main Content Area ─────────────────────────────── */}
       <main style={{ flex: 1, overflow: 'auto', padding: '1.75rem' }}>
 
-        {/* Page Header */}
-        <div style={{ marginBottom: '1.75rem' }}>
-          <h2 style={{ fontFamily: 'var(--font-heading)', color: '#fff', fontSize: '1.5rem', margin: 0 }}>
-            {NAV_ITEMS.find(n => n.id === activeTab)?.label}
-          </h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', margin: '0.25rem 0 0 0' }}>
-            {activeTab === 'overview'   && `${totalAnimals} animals monitored • ${unreadAlerts} unread alerts • Live data from Firestore`}
-            {activeTab === 'animals'    && 'FR-F06 to FR-F13 — Register, manage, and view medical records for your livestock'}
-            {activeTab === 'monitoring' && 'FR-F14 to FR-F19 — Real-time sensor streams from ESP32 smart collars'}
-            {activeTab === 'ai'         && 'FR-F20 to FR-F29 — AI-powered health analysis and detection algorithms'}
-            {activeTab === 'gps'        && 'FR-F30 to FR-F33 — Live GPS tracking, movement history, and geofence management'}
-            {activeTab === 'alerts'     && 'FR-F34 to FR-F41 — All alert types and notification history'}
-            {activeTab === 'reports'    && 'FR-F42 to FR-F46 — Generate and export health and activity reports'}
-            {activeTab === 'profile'    && 'FR-F04, FR-F05 — Manage your account and security settings'}
-          </p>
+        {/* Page Header with Data Feeding Mode Switcher */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+          <div>
+            <h2 style={{ fontFamily: 'var(--font-heading)', color: '#fff', fontSize: '1.5rem', margin: 0 }}>
+              {NAV_ITEMS.find(n => n.id === activeTab)?.label}
+            </h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', margin: '0.25rem 0 0 0' }}>
+              {activeTab === 'overview'   && `${totalAnimals} animals monitored • ${unreadAlerts} unread alerts • Live data from Firestore`}
+              {activeTab === 'animals'    && 'FR-F06 to FR-F13 — Register, manage, and view medical records for your livestock'}
+              {activeTab === 'monitoring' && 'FR-F14 to FR-F19 — Real-time sensor streams from ESP32 smart collars'}
+              {activeTab === 'ai'         && 'FR-F20 to FR-F29 — AI-powered health analysis and detection algorithms'}
+              {activeTab === 'gps'        && 'FR-F30 to FR-F33 — Live GPS tracking, movement history, and geofence management'}
+              {activeTab === 'alerts'     && 'FR-F34 to FR-F41 — All alert types and notification history'}
+              {activeTab === 'reports'    && 'FR-F42 to FR-F46 — Generate and export health and activity reports'}
+              {activeTab === 'profile'    && 'FR-F04, FR-F05 — Manage your account and security settings'}
+              {activeTab === 'simulator'  && 'Module 6 — Test all AI health, activity & geofence scenarios without hardware'}
+            </p>
+          </div>
+
+          {/* Mode Switcher Toggle Widget */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '4px',
+            background: 'rgba(10, 14, 30, 0.95)', border: '1px solid var(--border-glass)',
+            borderRadius: '30px', padding: '4px 6px', boxShadow: '0 4px 14px rgba(0,0,0,0.4)'
+          }}>
+            <button
+              onClick={() => toggleDataFeedingMode('realtime')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '6px 14px', borderRadius: '20px', border: 'none',
+                fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s',
+                background: dataFeedingMode === 'realtime' ? 'rgba(16, 185, 129, 0.2)' : 'transparent',
+                color: dataFeedingMode === 'realtime' ? 'var(--primary)' : 'var(--text-muted)',
+                boxShadow: dataFeedingMode === 'realtime' ? '0 0 10px rgba(16, 185, 129, 0.3)' : 'none',
+                border: dataFeedingMode === 'realtime' ? '1px solid var(--primary)' : '1px solid transparent'
+              }}
+            >
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%',
+                background: dataFeedingMode === 'realtime' ? 'var(--primary)' : '#64748b',
+                boxShadow: dataFeedingMode === 'realtime' ? '0 0 8px var(--primary)' : 'none'
+              }} />
+              🟢 Real-time IoT Mode
+            </button>
+
+            <button
+              onClick={() => toggleDataFeedingMode('simulator')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '6px 14px', borderRadius: '20px', border: 'none',
+                fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s',
+                background: dataFeedingMode === 'simulator' ? 'rgba(168, 85, 247, 0.2)' : 'transparent',
+                color: dataFeedingMode === 'simulator' ? '#c084fc' : 'var(--text-muted)',
+                boxShadow: dataFeedingMode === 'simulator' ? '0 0 10px rgba(168, 85, 247, 0.3)' : 'none',
+                border: dataFeedingMode === 'simulator' ? '1px solid #c084fc' : '1px solid transparent'
+              }}
+            >
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%',
+                background: dataFeedingMode === 'simulator' ? '#c084fc' : '#64748b',
+                boxShadow: dataFeedingMode === 'simulator' ? '0 0 8px #c084fc' : 'none'
+              }} />
+              🧪 Simulator Mode
+            </button>
+          </div>
         </div>
+
+        {/* Mode Notification Banner when Simulator Mode Active */}
+        {dataFeedingMode === 'simulator' && (
+          <div style={{
+            background: 'rgba(168, 85, 247, 0.1)', border: '1px solid rgba(168, 85, 247, 0.3)',
+            borderRadius: '12px', padding: '0.75rem 1.25rem', marginBottom: '1.5rem',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            fontSize: '0.82rem', color: '#e9d5ff', flexWrap: 'wrap', gap: '0.75rem'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <Beaker size={18} color="#c084fc" />
+              <span>
+                <strong>🧪 SIMULATOR DATA FEEDING MODE ACTIVE:</strong> System is operating in test mode. Simulated test scenarios injected from the Simulator tab will feed all AI models &amp; dashboards.
+              </span>
+            </div>
+            <button
+              onClick={() => toggleDataFeedingMode('realtime')}
+              style={{
+                background: 'rgba(16, 185, 129, 0.2)', border: '1px solid var(--primary)',
+                color: 'var(--primary)', padding: '5px 12px', borderRadius: '8px',
+                fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              Switch to Real-time IoT Mode →
+            </button>
+          </div>
+        )}
+
+        {/* Real-time AI Camera Stream Detection Banner */}
+        {cameraCvData && cameraCvData.prediction && cameraCvData.prediction.toLowerCase() !== 'healthy' && (
+          <div style={{
+            background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.4)',
+            borderRadius: '12px', padding: '0.75rem 1.25rem', marginBottom: '1.5rem',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            fontSize: '0.82rem', color: '#fef3c7', flexWrap: 'wrap', gap: '0.75rem',
+            animation: 'fadeIn 0.3s ease'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <Camera size={18} color="var(--warning)" />
+              <span>
+                <strong>📹 LIVE AI CAMERA DETECTION:</strong> Camera CV model detected <strong style={{ color: 'var(--warning)', textTransform: 'uppercase' }}>{cameraCvData.prediction}</strong> for <strong>Daisy (MAC: 28:05:A5:07:3B:94)</strong> with <strong>{(cameraCvData.confidence_percent || cameraCvData.confidence * 100 || 0).toFixed(1)}% confidence</strong>!
+              </span>
+            </div>
+            <button
+              onClick={() => setActiveTab('cv_disease')}
+              style={{
+                background: 'rgba(245, 158, 11, 0.2)', border: '1px solid var(--warning)',
+                color: 'var(--warning)', padding: '5px 12px', borderRadius: '8px',
+                fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              View Realtime Camera CV →
+            </button>
+          </div>
+        )}
 
         {/* ── Overview Tab ─────────────────────────────────── */}
         {activeTab === 'overview' && (
@@ -549,7 +791,11 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
                   <span className="metric-label">Average Temperature</span>
                   <div className="metric-value-row">
                     <h3>{avgTemp}°C</h3>
-                    <span className="status-indicator-badge positive">Live</span>
+                    {anyDeviceOnline ? (
+                      <span className="status-indicator-badge positive">Live</span>
+                    ) : (
+                      <span className="status-indicator-badge" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>Offline</span>
+                    )}
                   </div>
                   <p className="metric-sub">Target: 38.5°C – 39.5°C</p>
                 </div>
@@ -612,13 +858,22 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
                 <div className="inventory-list">
                   {animals.slice(0, 5).map(a => {
                     const r = latestReadings[a.docId] || {};
+                    const isOnline = r.timestamp && (Date.now() - (r.timestamp.toDate ? r.timestamp.toDate() : new Date(r.timestamp)).getTime()) < 15000;
                     return (
                       <div key={a.docId} className="inventory-item" onClick={() => setActiveTab('monitoring')} style={{ cursor: 'pointer' }}>
                         <div className="item-left">
                           <div className={`health-indicator-border ${hClass(a.healthStatus)}`}></div>
                           <div className="item-title-block">
-                            <h6>{a.name}</h6>
+                            <h6 style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                              {a.name}
+                              {!isOnline && r.timestamp && (
+                                <span style={{ fontSize: '0.58rem', color: 'var(--danger)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.15)', padding: '1px 3px', borderRadius: '3px' }}>Offline</span>
+                              )}
+                            </h6>
                             <span>{a.tagNumber} • {a.species}</span>
+                            {!isOnline && r.timestamp && (
+                              <span style={{ fontSize: '0.62rem', color: 'var(--text-dark)', display: 'block', marginTop: '0.15rem' }}>Last seen: {fmtTime(r.timestamp)}</span>
+                            )}
                           </div>
                         </div>
                         <div className="item-right">
@@ -670,7 +925,7 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
             <section style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem' }}>
               {[
                 { label: 'Register Animal', sub: 'FR-F06', tab: 'animals', color: 'var(--primary)' },
-                { label: 'View AI Health', sub: 'FR-F20–F29', tab: 'ai', color: 'var(--secondary)' },
+                { label: 'Activity ML', sub: 'FR-F20–F29', tab: 'activity_rec', color: 'var(--secondary)' },
                 { label: 'GPS Tracking', sub: 'FR-F30–F33', tab: 'gps', color: '#c084fc' },
                 { label: 'Export Report', sub: 'FR-F46', tab: 'reports', color: 'var(--warning)' },
               ].map(({ label, sub, tab, color }) => (
@@ -695,7 +950,13 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
           <MonitoringTab animals={animals} latestReadings={latestReadings} latestGps={latestGps} devices={devices} />
         )}
         {activeTab === 'ai' && (
-          <AIHealthTab animals={animals} latestAI={latestAI} />
+          <AIHealthTab animals={animals} latestAI={latestAI} latestReadings={latestReadings} alerts={alerts} />
+        )}
+        {activeTab === 'activity_rec' && (
+          <ActivityRecognitionTab animals={animals} latestReadings={latestReadings} />
+        )}
+        {activeTab === 'cv_disease' && (
+          <CVDiseaseTab animals={animals} devices={devices} />
         )}
         {activeTab === 'gps' && (
           <GPSTab 
@@ -704,6 +965,7 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
             geofences={geofences} 
             laptopCoords={laptopCoords}
             geofenceRadius={sysConfig?.geofenceBounds?.radius ?? 200}
+            tick={tick}
           />
         )}
         {activeTab === 'alerts' && (
@@ -712,8 +974,20 @@ export default function FarmerDashboard({ onLogout, userEmail, userId }) {
         {activeTab === 'reports' && (
           <ReportsTab animals={animals} alerts={alerts} latestReadings={latestReadings} latestAI={latestAI} />
         )}
+        {activeTab === 'early_detection' && (
+          <EarlyDetectionTab animals={animals} latestReadings={latestReadings} alerts={alerts} />
+        )}
         {activeTab === 'profile' && (
           <ProfileTab userEmail={userEmail} userId={userId} />
+        )}
+        {activeTab === 'simulator' && (
+          <SimulatorTab 
+            animals={animals} 
+            devices={devices} 
+            dataFeedingMode={dataFeedingMode}
+            toggleDataFeedingMode={toggleDataFeedingMode}
+            onSimulatedUpdate={handleSimulatedUpdate}
+          />
         )}
 
       </main>

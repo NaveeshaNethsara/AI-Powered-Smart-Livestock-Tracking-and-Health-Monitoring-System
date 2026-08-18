@@ -10,7 +10,8 @@ import {
   doc, getDoc, setDoc
 } from 'firebase/firestore';
 import { sendPasswordResetEmail } from 'firebase/auth';
-import { db, auth } from '../firebase';
+import { ref, onValue } from 'firebase/database';
+import { db, auth, rtdb } from '../firebase';
 import { jsPDF } from 'jspdf';
 
 export default function VetDashboard({ onLogout, userEmail, userId }) {
@@ -24,6 +25,7 @@ export default function VetDashboard({ onLogout, userEmail, userId }) {
   const [healthRecords, setHealthRecords] = useState([]);
   const [vaccinations, setVaccinations] = useState([]);
   const [sensorHistory, setSensorHistory] = useState([]); // FR-V06 Sensor History
+  const [devices, setDevices]             = useState([]);
   const [loading, setLoading]           = useState(true);
 
   // Filter states
@@ -66,6 +68,14 @@ export default function VetDashboard({ onLogout, userEmail, userId }) {
     });
   }, [userId]);
 
+  // Load all devices from Firestore for MAC resolution
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'devices'), (snap) => {
+      setDevices(snap.docs.map(d => ({ docId: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
   // ── 2. Load all animals ────────────────────────────────────
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'animals'), (snap) => {
@@ -92,7 +102,16 @@ export default function VetDashboard({ onLogout, userEmail, userId }) {
     );
     onSnapshot(q, (snap) => {
       if (!snap.empty) {
-        setLatestReadings(prev => ({ ...prev, [animalId]: snap.docs[0].data() }));
+        setLatestReadings(prev => {
+          const existing = prev[animalId];
+          const incoming = snap.docs[0].data();
+          if (existing && existing.timestamp && incoming.timestamp) {
+            const tExist = existing.timestamp.seconds || new Date(existing.timestamp).getTime()/1000;
+            const tIncoming = incoming.timestamp.seconds || new Date(incoming.timestamp).getTime()/1000;
+            if (tExist >= tIncoming) return prev; // Keep the fresher RTDB stream values
+          }
+          return { ...prev, [animalId]: incoming };
+        });
       }
     });
   };
@@ -149,6 +168,122 @@ export default function VetDashboard({ onLogout, userEmail, userId }) {
     });
     return () => unsub();
   }, [selectedAnimal?.docId]);
+
+  // ── Realtime Database listener for ESP32 live telemetry ──
+  useEffect(() => {
+    if (animals.length === 0) return;
+
+    const activeRTDBListeners = [];
+
+    animals.forEach(a => {
+      if (!a.deviceId) return;
+
+      const deviceDoc = devices.find(d => d.deviceId === a.deviceId || d.docId === a.deviceId);
+      const listenerKey = deviceDoc?.macAddress ? deviceDoc.macAddress.toUpperCase().trim() : a.deviceId;
+
+      const deviceRef = ref(rtdb, `livestock/${listenerKey}/latest`);
+      
+      const unsubscribe = onValue(deviceRef, (snapshot) => {
+        if (!snapshot.exists()) return;
+        const val = snapshot.val();
+        
+        // Read real-time heartRate from sensor if available and valid (> 0)
+        let heartRate = val.heartRate;
+        const temp = val.temperature || 38.5;
+        const ax = val.accelerometer?.x || 0;
+        const ay = val.accelerometer?.y || 0;
+        const az = val.accelerometer?.z || 0;
+
+        // Process activity level: prefer backend ML classification, fallback to magnitude thresholds
+        let activity = val.activityLevel;
+        const magnitude = Math.sqrt(ax * ax + ay * ay + az * az);
+        let stepIncrement = 0;
+
+        if (heartRate === undefined || heartRate === null || heartRate <= 0) {
+          // Fallback to simulation/estimation if sensor is not present/active
+          heartRate = Math.floor(65 + (temp - 38.5) * 8);
+
+          // Normalize activity values to lowercase to match styling keys
+          if (activity) {
+            activity = activity.toLowerCase();
+          }
+
+          if (activity === 'running' || (!activity && magnitude > 25000)) {
+            activity = 'running';
+            stepIncrement = 3;
+            heartRate += 25;
+          } else if (activity === 'walking' || (!activity && magnitude > 16000)) {
+            activity = 'walking';
+            stepIncrement = 1;
+            heartRate += 12;
+          } else if (activity === 'sleeping') {
+            activity = 'sleeping';
+            heartRate -= 10;
+          } else if (activity === 'standing') {
+            activity = 'standing';
+          } else if (activity === 'resting') {
+            activity = 'resting';
+          } else if (activity === 'abnormal movement') {
+            activity = 'abnormal movement';
+            heartRate += 15;
+          } else {
+            activity = 'resting';
+          }
+          heartRate = Math.max(55, Math.min(115, heartRate));
+        } else {
+          // If using actual heart rate sensor, we still calculate step count based on activity
+          if (activity) {
+            activity = activity.toLowerCase();
+          }
+          if (activity === 'running' || (!activity && magnitude > 25000)) {
+            activity = 'running';
+            stepIncrement = 3;
+          } else if (activity === 'walking' || (!activity && magnitude > 16000)) {
+            activity = 'walking';
+            stepIncrement = 1;
+          } else if (activity === 'sleeping') {
+            activity = 'sleeping';
+          } else if (activity === 'standing') {
+            activity = 'standing';
+          } else if (activity === 'resting') {
+            activity = 'resting';
+          } else if (activity === 'abnormal movement') {
+            activity = 'abnormal movement';
+          } else {
+            activity = 'resting';
+          }
+        }
+
+        const prevSteps = latestReadings[a.docId]?.stepCount || 120;
+        const newSteps = prevSteps + stepIncrement;
+
+        const timestampDate = val.timestamp ? new Date(val.timestamp) : new Date();
+
+        const readingData = {
+          bodyTemperature: parseFloat(temp.toFixed(1)),
+          heartRate,
+          isRealHeartRate: val.heartRate > 0,
+          activityLevel: activity,
+          stepCount: newSteps,
+          accelerometerX: parseFloat((ax / 16384.0).toFixed(2)),
+          accelerometerY: parseFloat((ay / 16384.0).toFixed(2)),
+          accelerometerZ: parseFloat((az / 16384.0).toFixed(2)),
+          batteryLevel: val.battery || 85,
+          sensorStatus: 'connected',
+          isBuffered: false,
+          timestamp: Timestamp.fromDate(timestampDate)
+        };
+
+        setLatestReadings(prev => ({ ...prev, [a.docId]: readingData }));
+      });
+
+      activeRTDBListeners.push({ deviceId: a.deviceId, unsubscribe });
+    });
+
+    return () => {
+      activeRTDBListeners.forEach(l => l.unsubscribe());
+    };
+  }, [animals, devices]);
 
   // ── Helpers ────────────────────────────────────────────────
   const getReading = (id) => latestReadings[id] || {};
@@ -590,9 +725,24 @@ export default function VetDashboard({ onLogout, userEmail, userId }) {
                             {selectedEnriched.temp !== null ? `${selectedEnriched.temp} °C` : '—'}
                           </span>
                         </div>
-                        <div style={{ background:'rgba(255,255,255,0.015)', border:'1px solid rgba(255,255,255,0.03)', padding:'0.75rem', borderRadius:'12px' }}>
-                          <span style={{ fontSize:'0.7rem', color:'var(--text-muted)', display:'block' }}>HEART RATE</span>
-                          <span style={{ fontSize:'1.25rem', fontWeight:700, color: selectedEnriched.heartRate > 90 ? 'var(--danger)' : '#fff' }}>
+                        <div style={{ background:'rgba(255,255,255,0.015)', border:'1px solid rgba(255,255,255,0.03)', padding:'0.75rem', borderRadius:'12px', position: 'relative' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize:'0.7rem', color:'var(--text-muted)' }}>HEART RATE</span>
+                            {selectedEnriched.heartRate !== null && (
+                              <span style={{
+                                fontSize: '0.52rem',
+                                padding: '1px 3px',
+                                borderRadius: '3px',
+                                fontWeight: 600,
+                                background: selectedEnriched.isRealHeartRate ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.05)',
+                                color: selectedEnriched.isRealHeartRate ? 'var(--primary)' : 'var(--text-muted)',
+                                border: selectedEnriched.isRealHeartRate ? '1px solid rgba(16,185,129,0.2)' : '1px solid rgba(255,255,255,0.1)'
+                              }}>
+                                {selectedEnriched.isRealHeartRate ? '● Sensor' : '● Est.'}
+                              </span>
+                            )}
+                          </div>
+                          <span style={{ fontSize:'1.25rem', fontWeight:700, color: selectedEnriched.heartRate > 90 ? 'var(--danger)' : '#fff', display: 'block', marginTop: '0.15rem' }}>
                             {selectedEnriched.heartRate !== null ? `${selectedEnriched.heartRate} BPM` : '—'}
                           </span>
                         </div>

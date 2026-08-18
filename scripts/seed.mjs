@@ -121,98 +121,6 @@ const ANIMALS = [
       registeredAt: daysAgo(80),
       updatedAt: daysAgo(1)
     }
-  },
-  {
-    id: 'animal-002',
-    data: {
-      animalId: 'animal-002',
-      tagNumber: 'TAG-102',
-      name: 'Daisy',
-      species: 'Cattle',
-      breed: 'Jersey',
-      gender: 'female',
-      dateOfBirth: daysAgo(1095),
-      weight: 420,
-      color: 'Brown',
-      imageUrl: '',
-      farmerId: 'farmer-uid-001',
-      assignedVetId: 'vet-uid-001',
-      deviceId: 'ESP32-A02',
-      healthStatus: 'healthy',
-      currentHealthScore: 92,
-      isActive: true,
-      registeredAt: daysAgo(78),
-      updatedAt: daysAgo(1)
-    }
-  },
-  {
-    id: 'animal-003',
-    data: {
-      animalId: 'animal-003',
-      tagNumber: 'TAG-103',
-      name: 'Molly',
-      species: 'Cattle',
-      breed: 'Angus',
-      gender: 'female',
-      dateOfBirth: daysAgo(730),
-      weight: 380,
-      color: 'Black',
-      imageUrl: '',
-      farmerId: 'farmer-uid-001',
-      assignedVetId: 'vet-uid-001',
-      deviceId: 'ESP32-A01',
-      healthStatus: 'at_risk',
-      currentHealthScore: 61,
-      isActive: true,
-      registeredAt: daysAgo(75),
-      updatedAt: now
-    }
-  },
-  {
-    id: 'animal-004',
-    data: {
-      animalId: 'animal-004',
-      tagNumber: 'TAG-104',
-      name: 'Wooly',
-      species: 'Sheep',
-      breed: 'Merino',
-      gender: 'male',
-      dateOfBirth: daysAgo(548),
-      weight: 78,
-      color: 'White',
-      imageUrl: '',
-      farmerId: 'farmer-uid-001',
-      assignedVetId: 'vet-uid-001',
-      deviceId: 'ESP32-A05',
-      healthStatus: 'critical',
-      currentHealthScore: 42,
-      isActive: true,
-      registeredAt: daysAgo(60),
-      updatedAt: now
-    }
-  },
-  {
-    id: 'animal-005',
-    data: {
-      animalId: 'animal-005',
-      tagNumber: 'TAG-105',
-      name: 'Billy',
-      species: 'Goat',
-      breed: 'Boer',
-      gender: 'male',
-      dateOfBirth: daysAgo(365),
-      weight: 55,
-      color: 'Brown and White',
-      imageUrl: '',
-      farmerId: 'farmer-uid-001',
-      assignedVetId: 'vet-uid-001',
-      deviceId: 'ESP32-A03',
-      healthStatus: 'healthy',
-      currentHealthScore: 79,
-      isActive: true,
-      registeredAt: daysAgo(55),
-      updatedAt: daysAgo(2)
-    }
   }
 ];
 
@@ -884,7 +792,7 @@ async function seed() {
   console.log('🎉  DATABASE SEED COMPLETE!');
   console.log('═══════════════════════════════════════════════════');
   console.log('  Collections created: 13');
-  console.log('  Animals seeded: 5  (Bessie, Daisy, Molly, Wooly, Billy)');
+  console.log('  Animals seeded: 1  (Bessie)');
   console.log('  Devices seeded: 5  (ESP32-A01 to ESP32-A05)');
   console.log('  Users seeded: 3  (farmer, vet, admin)');
   console.log('  Alerts seeded: 5  (2 critical, 3 warning)');

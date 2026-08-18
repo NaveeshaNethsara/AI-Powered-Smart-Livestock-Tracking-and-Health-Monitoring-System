@@ -1,0 +1,139 @@
+# Run with:
+# python predict.py image_name.file_type
+#
+# Firebase credentials can be supplied with either:
+# export GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/service-account.json"
+# or:
+# python predict.py image.jpg --service-account /absolute/path/service-account.json
+
+import argparse
+import os
+from pathlib import Path
+import sys
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+from PIL import Image
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+
+
+BASE_DIR = Path(__file__).parent
+MODEL_PATH = BASE_DIR / "best_model.pth"
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Predict a cattle disease and save the result to Cloud Firestore."
+        )
+    )
+    parser.add_argument("image", help="Path to the image to classify")
+    parser.add_argument(
+        "--collection",
+        default=os.getenv("FIREBASE_COLLECTION", "predictions"),
+        help="Firestore collection name (default: predictions)",
+    )
+    parser.add_argument(
+        "--service-account",
+        default=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+        help=(
+            "Path to the Firebase service-account JSON file. "
+            "Defaults to GOOGLE_APPLICATION_CREDENTIALS."
+        ),
+    )
+    return parser.parse_args(), parser
+
+
+def initialize_firestore(service_account):
+    if not firebase_admin._apps:
+        if service_account:
+            service_account_path = Path(service_account).expanduser().resolve()
+            if not service_account_path.is_file():
+                raise FileNotFoundError(
+                    "Firebase service-account file does not exist: "
+                    f"{service_account_path}"
+                )
+            firebase_admin.initialize_app(
+                credentials.Certificate(str(service_account_path))
+            )
+        else:
+            # This works automatically when deployed to a supported Google
+            # environment configured with Application Default Credentials.
+            firebase_admin.initialize_app()
+
+    return firestore.client()
+
+
+def save_prediction(db, collection, prediction, confidence, image_path):
+    document_reference, _ = db.collection(collection).add(
+        {
+            "prediction": prediction,
+            "confidence": confidence,
+            "confidence_percent": confidence * 100,
+            "image_name": image_path.name,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+    return document_reference.id
+
+
+def main():
+    args, parser = parse_arguments()
+    image_path = Path(args.image).expanduser().resolve()
+
+    if not image_path.is_file():
+        parser.error(f"Image does not exist: {image_path}")
+
+    checkpoint = torch.load(MODEL_PATH, map_location="cpu")
+    classes = checkpoint["classes"]
+
+    transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+        ]
+    )
+
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, len(classes))
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    image = Image.open(image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+        output = model(image_tensor)
+        probabilities = torch.softmax(output, dim=1)
+        confidence, prediction = torch.max(probabilities, 1)
+
+    predicted_class = classes[prediction.item()]
+    confidence_value = float(confidence.item())
+
+    print("Prediction:", predicted_class)
+    print("Confidence:", f"{confidence_value * 100:.2f}%")
+
+    try:
+        db = initialize_firestore(args.service_account)
+        document_id = save_prediction(
+            db,
+            args.collection,
+            predicted_class,
+            confidence_value,
+            image_path,
+        )
+    except Exception as error:
+        print(f"Firebase save failed: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Saved to Firestore collection '{args.collection}' "
+        f"with document ID: {document_id}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

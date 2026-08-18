@@ -1,6 +1,5 @@
-// MonitoringTab.jsx — FR-F14 to FR-F19
-// Real-time body temperature, activity, GPS, battery, sensor connectivity, sensor readings
 import React, { useState } from 'react';
+import ECGHeartPulse from './ECGHeartPulse';
 import { Thermometer, Heart, Activity, Battery, Wifi, WifiOff, Clock, AlertTriangle } from 'lucide-react';
 
 export default function MonitoringTab({ animals, latestReadings, latestGps, devices }) {
@@ -57,7 +56,10 @@ export default function MonitoringTab({ animals, latestReadings, latestGps, devi
           const r = getReading(animal.docId);
           const g = getGps(animal.docId);
           const dev = getDevice(animal.deviceId);
-          const connected = r.sensorStatus === 'connected';
+          
+          // Dynamically check online status based on last timestamp (updated in past 15s)
+          const isOnline = r && r.timestamp && (Date.now() - (r.timestamp.toDate ? r.timestamp.toDate() : new Date(r.timestamp)).getTime()) < 15000;
+          const connected = !!isOnline;
           const isSelected = selectedId === animal.docId;
 
           return (
@@ -89,11 +91,12 @@ export default function MonitoringTab({ animals, latestReadings, latestGps, devi
                     {r.bodyTemperature ? `${r.bodyTemperature}°C` : '—'}
                   </span>
                 </div>
-                <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '10px', padding: '0.75rem' }}>
-                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'block' }}>HEART RATE</span>
-                  <span style={{ fontSize: '1.3rem', fontWeight: 700, color: r.heartRate ? hrColor(r.heartRate) : 'var(--text-dark)' }}>
-                    {r.heartRate ? `${r.heartRate} BPM` : '—'}
-                  </span>
+                <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '10px', padding: '0.75rem', gridColumn: 'span 2' }}>
+                  <ECGHeartPulse 
+                    bpm={r.heartRate || 65} 
+                    isRealSensor={r.isRealHeartRate}
+                    height={40}
+                  />
                 </div>
                 <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '10px', padding: '0.75rem' }}>
                   <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'block' }}>ACTIVITY</span>
@@ -132,7 +135,7 @@ export default function MonitoringTab({ animals, latestReadings, latestGps, devi
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
                     <span style={{ color: 'var(--text-muted)' }}>Sensor Status (FR-F18):</span>
-                    <span style={{ color: connected ? 'var(--primary)' : 'var(--danger)' }}>{r.sensorStatus || '—'}</span>
+                    <span style={{ color: connected ? 'var(--primary)' : 'var(--danger)' }}>{connected ? 'online' : 'offline'}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
                     <span style={{ color: 'var(--text-muted)' }}>Device Firmware:</span>

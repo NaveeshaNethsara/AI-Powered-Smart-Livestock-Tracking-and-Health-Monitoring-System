@@ -24,6 +24,8 @@
 #include <DallasTemperature.h>
 #include <Wire.h>
 #include <TinyGPS++.h>
+#include "MAX30105.h"
+#include "heartRate.h"
 
 // ============================================================
 //  CONFIG
@@ -45,8 +47,16 @@
 
 // ---- Timing (all non-blocking, millis()-based) ----
 const unsigned long TEMP_READ_INTERVAL = 3000;   // read DS18B20 every 3s
-const unsigned long MPU_READ_INTERVAL  = 200;    // read MPU6050 every 200ms
+const unsigned long MPU_READ_INTERVAL  = 50;     // read MPU6050 every 50ms (20Hz)
 const unsigned long SEND_INTERVAL_MS   = 3000;   // push to Firebase every 3s
+
+// ---- 20Hz Sliding Window Buffer for local feature extraction ----
+#define WINDOW_SIZE 50
+float windowX[WINDOW_SIZE];
+float windowY[WINDOW_SIZE];
+float windowZ[WINDOW_SIZE];
+int windowIdx = 0;
+bool windowFull = false;
 
 // ============================================================
 //  Globals
@@ -68,6 +78,16 @@ int16_t latestAx = 0, latestAy = 0, latestAz = 0;
 double latestLat = 7.291;   // Default fallback to Farm latitude (Kandy, SL)
 double latestLng = 80.633;  // Default fallback to Farm longitude (Kandy, SL)
 bool gpsHasFix = true;      // Default to true to continuously transmit coordinates
+
+// ---- MAX30102 Globals ----
+MAX30105 particleSensor;
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute = 0;
+int beatAvg = 0;
+bool max30102Connected = false;
 
 // Device ID dynamically loaded from the Hardware MAC Address
 String deviceId = "";
@@ -126,6 +146,45 @@ void initMPU6050() {
   Wire.endTransmission(true);
 }
 
+void initMAX30102() {
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) { // Use existing I2C port, 400kHz speed
+    Serial.println("⚠️ MAX30102 was not found. Heart rate features disabled.");
+    max30102Connected = false;
+  } else {
+    Serial.println("✅ MAX30102 initialized successfully.");
+    max30102Connected = true;
+    particleSensor.setup(); // Configure sensor with default settings
+    particleSensor.setPulseAmplitudeRed(0x0A); // Turn Red LED to low to indicate it's running
+    particleSensor.setPulseAmplitudeGreen(0);  // Turn off Green LED
+  }
+}
+
+void readMAX30102() {
+  if (!max30102Connected) return;
+
+  long irValue = particleSensor.getIR();
+  if (irValue < 50000) {
+    // No contact (no finger/tissue placed on sensor)
+    beatAvg = 0;
+    return;
+  }
+
+  if (checkForBeat(irValue) == true) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+    beatsPerMinute = 60 / (delta / 1000.0);
+    if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+      rates[rateSpot++] = (byte)beatsPerMinute;
+      rateSpot %= RATE_SIZE;
+      long sum = 0;
+      for (byte x = 0 ; x < RATE_SIZE ; x++) {
+        sum += rates[x];
+      }
+      beatAvg = sum / RATE_SIZE;
+    }
+  }
+}
+
 // ============================================================
 //  Sensor read functions (non-blocking - just update globals)
 // ============================================================
@@ -149,6 +208,22 @@ void readMPU6050() {
     latestAx = Wire.read() << 8 | Wire.read();
     latestAy = Wire.read() << 8 | Wire.read();
     latestAz = Wire.read() << 8 | Wire.read();
+
+    // Scale raw LSB values to g (units of gravity)
+    float ax = latestAx / 16384.0;
+    float ay = latestAy / 16384.0;
+    float az = latestAz / 16384.0;
+
+    // Push into sliding window circular buffer
+    windowX[windowIdx] = ax;
+    windowY[windowIdx] = ay;
+    windowZ[windowIdx] = az;
+    windowIdx++;
+
+    if (windowIdx >= WINDOW_SIZE) {
+      windowIdx = 0;
+      windowFull = true;
+    }
   }
 }
 
@@ -189,11 +264,94 @@ void sendSnapshotToFirebase() {
   json.set("accelerometer/y", latestAy);
   json.set("accelerometer/z", latestAz);
 
+  // Calculate 13-column feature extraction locally at 20Hz
+  float meanX = 0, meanY = 0, meanZ = 0;
+  float stdX = 0, stdY = 0, stdZ = 0;
+  float minMag = 99.0, maxMag = -99.0, meanMag = 0;
+  float sma = 0;
+
+  if (windowFull) {
+    float sumX = 0, sumY = 0, sumZ = 0;
+    float magSum = 0;
+    float absSumX = 0, absSumY = 0, absSumZ = 0;
+    
+    // First pass: Means, Magnitudes, and SMA
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+      sumX += windowX[i];
+      sumY += windowY[i];
+      sumZ += windowZ[i];
+      
+      float mag = sqrt(windowX[i]*windowX[i] + windowY[i]*windowY[i] + windowZ[i]*windowZ[i]);
+      if (mag < minMag) minMag = mag;
+      if (mag > maxMag) maxMag = mag;
+      magSum += mag;
+      
+      absSumX += abs(windowX[i]);
+      absSumY += abs(windowY[i]);
+      absSumZ += abs(windowZ[i]);
+    }
+    
+    meanX = sumX / WINDOW_SIZE;
+    meanY = sumY / WINDOW_SIZE;
+    meanZ = sumZ / WINDOW_SIZE;
+    meanMag = magSum / WINDOW_SIZE;
+    sma = (absSumX + absSumY + absSumZ) / WINDOW_SIZE;
+    
+    // Second pass: Standard Deviations
+    float varX = 0, varY = 0, varZ = 0;
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+      varX += pow(windowX[i] - meanX, 2);
+      varY += pow(windowY[i] - meanY, 2);
+      varZ += pow(windowZ[i] - meanZ, 2);
+    }
+    stdX = sqrt(varX / WINDOW_SIZE);
+    stdY = sqrt(varY / WINDOW_SIZE);
+    stdZ = sqrt(varZ / WINDOW_SIZE);
+
+    // Set features array keys
+    json.set("features/Mean_AccX", meanX);
+    json.set("features/Mean_AccY", meanY);
+    json.set("features/Mean_AccZ", meanZ);
+    json.set("features/Std_AccX", stdX);
+    json.set("features/Std_AccY", stdY);
+    json.set("features/Std_AccZ", stdZ);
+    json.set("features/Min_Magnitude", minMag);
+    json.set("features/Max_Magnitude", maxMag);
+    json.set("features/Mean_Magnitude", meanMag);
+    json.set("features/SMA", sma);
+  }
+
   // GPS coordinates are always sent (pre-populated with farm center coordinates if no lock exists)
   if (gpsHasFix) {
     json.set("gps/latitude", latestLat);
     json.set("gps/longitude", latestLng);
   }
+
+  // Set Heart Rate value (BPM)
+  json.set("heartRate", beatAvg);
+
+  // Print raw sensor values to the Serial Monitor for local hardware diagnostics
+  Serial.println("==================================================");
+  Serial.println("📊 CURRENT SENSOR VALUES:");
+  if (isnan(latestTempC)) {
+    Serial.println("  🌡️  DS18B20 Temp: READ ERROR (Using baseline 38.5°C)");
+  } else {
+    Serial.print("  🌡️  DS18B20 Temp: ");
+    Serial.print(latestTempC, 2);
+    Serial.println(" °C");
+  }
+  Serial.printf("  🏃 Accelerometer: AccX=%d | AccY=%d | AccZ=%d\n", latestAx, latestAy, latestAz);
+  Serial.printf("  📡 GPS Lat/Lng:   %.6f, %.6f (Fix: %s)\n", latestLat, latestLng, gpsHasFix ? "YES" : "NO");
+  if (max30102Connected) {
+    if (beatAvg > 0) {
+      Serial.printf("  ❤️  Heart Rate:   %d BPM\n", beatAvg);
+    } else {
+      Serial.println("  ❤️  Heart Rate:   NO CONTACT (0 BPM)");
+    }
+  } else {
+    Serial.println("  ❤️  Heart Rate:   SENSOR DISABLED");
+  }
+  Serial.println("==================================================");
 
   String basePath = String("/livestock/") + deviceId;
 
@@ -203,13 +361,6 @@ void sendSnapshotToFirebase() {
     Serial.println(deviceId);
   } else {
     Serial.println("❌ /latest failed: " + fbdo.errorReason());
-  }
-
-  // 2) Push a new timestamped record
-  if (Firebase.RTDB.pushJSON(&fbdo, (basePath + "/history").c_str(), &json)) {
-    Serial.println("✅ /history pushed");
-  } else {
-    Serial.println("❌ /history failed: " + fbdo.errorReason());
   }
 }
 
@@ -224,6 +375,7 @@ void setup() {
 
   tempSensor.begin();
   initMPU6050();
+  initMAX30102();
 
   // Initialize MAC address before connecting to Wi-Fi
   initDeviceMAC();
@@ -235,6 +387,9 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  // Poll heart rate sensor continuously
+  readMAX30102();
 
   // GPS needs to be polled continuously
   readGPS();

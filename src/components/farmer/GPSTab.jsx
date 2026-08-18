@@ -1,11 +1,11 @@
 // GPSTab.jsx — FR-F30 to FR-F33
 // Live location, movement history, geofence boundary, locate missing animals
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { MapPin, Navigation, AlertTriangle, Clock, Map as MapIcon } from 'lucide-react';
 import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 
-export default function GPSTab({ animals, latestGps, geofences, laptopCoords, geofenceRadius }) {
+export default function GPSTab({ animals, latestGps, geofences, laptopCoords, geofenceRadius, tick }) {
   const [selectedAnimal, setSelectedAnimal] = useState(null);
   const [gpsHistory, setGpsHistory]         = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -15,6 +15,13 @@ export default function GPSTab({ animals, latestGps, geofences, laptopCoords, ge
   const markersRef = useRef({});
   const circleRef = useRef(null);
   const laptopMarkerRef = useRef(null);
+
+  // Auto select first animal if none selected
+  useEffect(() => {
+    if (!selectedAnimal && animals.length > 0) {
+      setSelectedAnimal(animals[0]);
+    }
+  }, [animals, selectedAnimal]);
 
   // FR-F31: Load movement history for selected animal
   useEffect(() => {
@@ -31,6 +38,95 @@ export default function GPSTab({ animals, latestGps, geofences, laptopCoords, ge
     });
     return () => unsub();
   }, [selectedAnimal?.docId]);
+
+  // Geofence distance calculation helper
+  const checkGeofence = useCallback((lat, lng) => {
+    if (!lat || !lng) return true;
+    const center = laptopCoords || { lat: 7.291, lng: 80.633 };
+    const radiusMeters = geofenceRadius || 200;
+
+    const R = 6371000;
+    const dLat = (lat - center.lat) * Math.PI / 180;
+    const dLng = (lng - center.lng) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(center.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+              Math.sin(dLng/2) * Math.sin(dLng/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const distance = R * c;
+
+    return distance <= radiusMeters;
+  }, [laptopCoords, geofenceRadius]);
+
+  // Animal marker updates helper
+  const updateAnimalMarkers = useCallback(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !window.L) return;
+
+    // Clear old markers no longer in current list
+    Object.keys(markersRef.current).forEach(id => {
+      if (!animals.some(a => a.docId === id)) {
+        markersRef.current[id].remove();
+        delete markersRef.current[id];
+      }
+    });
+
+    // Create or update marker per animal coordinates
+    animals.forEach(a => {
+      const g = latestGps[a.docId] || {};
+      if (!g.latitude || !g.longitude) return;
+
+      const lat = g.latitude;
+      const lng = g.longitude;
+      const isSelected = selectedAnimal?.docId === a.docId;
+
+      // Geofence containment check
+      const isInside = g.isInsideGeofence !== undefined ? g.isInsideGeofence : checkGeofence(lat, lng);
+
+      // Color logic:
+      // If outside geofence -> vibrant red
+      // If critical health -> vibrant red
+      // If at risk -> warning amber
+      // Otherwise -> VIBRANT EMERALD GREEN!
+      const pinColor = !isInside
+        ? '#ef4444'
+        : (a.healthStatus === 'critical' ? '#ef4444' : a.healthStatus === 'at_risk' ? '#f59e0b' : '#10b981');
+
+      const statusTag = !isInside ? '⚠️ Outside' : '✅ Inside';
+
+      const customIcon = window.L.divIcon({
+        className: 'custom-leaflet-pin',
+        html: `
+          <div class="leaflet-animal-pin" style="position: relative; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+            <div style="position: absolute; width: 34px; height: 34px; border-radius: 50%; border: 2.5px solid ${pinColor}; animation: radar-ping 2s infinite; pointer-events: none;"></div>
+            <div style="width: 18px; height: 18px; border-radius: 50%; background: ${pinColor}; border: 3px solid #ffffff; box-shadow: 0 0 14px ${pinColor}, 0 2px 8px rgba(0,0,0,0.8); z-index: 10; cursor: pointer; display: flex; align-items: center; justify-content: center;">
+              <div style="width: 6px; height: 6px; border-radius: 50%; background: #ffffff;"></div>
+            </div>
+            <div style="position: absolute; bottom: 36px; left: 50%; transform: translateX(-50%); background: rgba(12, 17, 30, 0.95); color: #ffffff; border: 1.5px solid ${isSelected ? 'var(--primary)' : 'var(--border-glass)'}; font-weight: 700; font-size: 0.72rem; padding: 4px 10px; border-radius: 8px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,0.8); z-index: 20; pointer-events: auto; display: flex; align-items: center; gap: 5px;">
+              <span style="width: 8px; height: 8px; border-radius: 50%; background: ${pinColor}; display: inline-block;"></span>
+              <span>${a.name}</span>
+              <span style="font-weight: 500; font-size: 0.65rem; color: ${!isInside ? 'var(--danger)' : 'var(--primary)'};">(${statusTag})</span>
+            </div>
+          </div>
+        `,
+        iconSize: [40, 40],
+        iconAnchor: [20, 20]
+      });
+
+      if (markersRef.current[a.docId]) {
+        markersRef.current[a.docId].setLatLng([lat, lng]);
+        markersRef.current[a.docId].setIcon(customIcon);
+        markersRef.current[a.docId].setZIndexOffset(isSelected ? 4000 : 3000);
+      } else {
+        const marker = window.L.marker([lat, lng], { 
+          icon: customIcon,
+          zIndexOffset: isSelected ? 4000 : 3000 
+        })
+          .addTo(map)
+          .on('click', () => setSelectedAnimal(a));
+        markersRef.current[a.docId] = marker;
+      }
+    });
+  }, [animals, latestGps, selectedAnimal, checkGeofence]);
 
   // Leaflet Map Initialization and Geofence Circle Setup
   useEffect(() => {
@@ -75,69 +171,29 @@ export default function GPSTab({ animals, latestGps, geofences, laptopCoords, ge
       dashArray: '5, 5'
     }).addTo(map);
 
-    // Redraw laptop beacon marker
+    // Redraw laptop beacon marker (subtle blue center beacon)
     if (laptopMarkerRef.current) {
       laptopMarkerRef.current.remove();
     }
     const laptopIcon = window.L.divIcon({
       className: 'custom-leaflet-pin',
-      html: `<div style="width: 14px; height: 14px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 10px rgba(59, 130, 246, 0.8);"></div>`,
-      iconSize: [14, 14],
-      iconAnchor: [7, 7]
+      html: `<div style="width: 10px; height: 10px; background: #3b82f6; border: 2px solid rgba(255,255,255,0.8); border-radius: 50%; opacity: 0.6;" title="Geofence Base Center"></div>`,
+      iconSize: [10, 10],
+      iconAnchor: [5, 5]
     });
-    laptopMarkerRef.current = window.L.marker([center.lat, center.lng], { icon: laptopIcon })
+    laptopMarkerRef.current = window.L.marker([center.lat, center.lng], { icon: laptopIcon, zIndexOffset: 10 })
       .addTo(map)
       .bindPopup('<b>Laptop Base Location (Geofence Center)</b>');
 
-  }, [laptopCoords, geofenceRadius]);
+    // Render animal markers immediately on map setup
+    updateAnimalMarkers();
 
-  // Animal marker updates
+  }, [laptopCoords, geofenceRadius, updateAnimalMarkers]);
+
+  // Animal marker updates effect
   useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !window.L) return;
-
-    // Clear old markers no longer in current list
-    Object.keys(markersRef.current).forEach(id => {
-      if (!animals.some(a => a.docId === id)) {
-        markersRef.current[id].remove();
-        delete markersRef.current[id];
-      }
-    });
-
-    // Create or update marker per animal coordinates
-    animals.forEach(a => {
-      const g = latestGps[a.docId] || {};
-      if (!g.latitude || !g.longitude) return;
-
-      const lat = g.latitude;
-      const lng = g.longitude;
-      const hc = a.healthStatus === 'critical' ? 'critical' : a.healthStatus === 'at_risk' ? 'warning' : 'healthy';
-      const isSelected = selectedAnimal?.docId === a.docId;
-
-      const customIcon = window.L.divIcon({
-        className: 'custom-leaflet-pin',
-        html: `
-          <div class="map-animal-pin ${hc} ${isSelected ? 'selected' : ''}" style="position: relative;">
-            <span class="pin-pulse"></span>
-            <span class="pin-center-dot"></span>
-            <span class="pin-label-pop" style="visibility: visible; opacity: 1; transform: translate(-50%, -100%) translateY(-6px);">${a.name}</span>
-          </div>
-        `,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16]
-      });
-
-      if (markersRef.current[a.docId]) {
-        markersRef.current[a.docId].setLatLng([lat, lng]);
-        markersRef.current[a.docId].setIcon(customIcon);
-      } else {
-        const marker = window.L.marker([lat, lng], { icon: customIcon })
-          .addTo(map)
-          .on('click', () => setSelectedAnimal(a));
-        markersRef.current[a.docId] = marker;
-      }
-    });
-  }, [animals, latestGps, selectedAnimal]);
+    updateAnimalMarkers();
+  }, [updateAnimalMarkers, tick]);
 
   // Pan to selected animal coordinate change
   useEffect(() => {
@@ -146,7 +202,7 @@ export default function GPSTab({ animals, latestGps, geofences, laptopCoords, ge
     if (g.latitude && g.longitude && mapInstanceRef.current) {
       mapInstanceRef.current.setView([g.latitude, g.longitude], 16, { animate: true });
     }
-  }, [selectedAnimal?.docId]);
+  }, [selectedAnimal?.docId, latestGps]);
 
   // Clean map instance on unmount
   useEffect(() => {
@@ -201,27 +257,36 @@ export default function GPSTab({ animals, latestGps, geofences, laptopCoords, ge
           {animals.map(a => {
             const g = getGps(a.docId);
             const isSelected = selectedAnimal?.docId === a.docId;
-            const isMissing  = missingAnimals.some(m => m.docId === a.docId);
+            const isInside   = g.isInsideGeofence !== undefined ? g.isInsideGeofence : checkGeofence(g.latitude, g.longitude);
+
             return (
               <div
                 key={a.docId}
                 className="map-card-wrapper"
-                style={{ padding: '1rem', cursor: 'pointer', borderColor: isSelected ? 'var(--primary)' : isMissing ? 'rgba(239,68,68,0.3)' : 'var(--border-glass)' }}
+                style={{ padding: '1rem', cursor: 'pointer', borderColor: isSelected ? 'var(--primary)' : !isInside ? 'rgba(239,68,68,0.4)' : 'var(--border-glass)' }}
                 onClick={() => setSelectedAnimal(a)}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <MapPin size={16} color={isMissing ? 'var(--danger)' : 'var(--primary)'} />
+                    <MapPin size={18} color={!isInside ? 'var(--danger)' : 'var(--primary)'} />
                     <div>
-                      <h6 style={{ color: '#fff', margin: 0, fontSize: '0.9rem' }}>{a.name} <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.75rem' }}>({a.tagNumber})</span></h6>
-                      <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '0.72rem' }}>
+                      <h6 style={{ color: '#fff', margin: 0, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                        {a.name} 
+                        <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.75rem' }}>({a.tagNumber})</span>
+                      </h6>
+                      <p style={{ color: 'var(--text-muted)', margin: '0.15rem 0 0 0', fontSize: '0.72rem' }}>
                         {g.latitude ? `${g.latitude.toFixed(5)}, ${g.longitude.toFixed(5)}` : 'No GPS data'}
                       </p>
+                      {g.timestamp && (
+                        <span style={{ fontSize: '0.65rem', color: 'var(--text-dark)', display: 'block', marginTop: '0.2rem' }}>
+                          Last update: {fmtTime(g.timestamp)}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    <span style={{ fontSize: '0.65rem', padding: '0.2rem 0.6rem', borderRadius: '20px', color: g.isInsideGeofence === false ? 'var(--danger)' : 'var(--primary)', background: g.isInsideGeofence === false ? 'rgba(239,68,68,0.08)' : 'rgba(16,185,129,0.08)' }}>
-                      {g.isInsideGeofence === false ? '⚠️ Outside' : '✅ Inside'}
+                    <span style={{ fontSize: '0.65rem', padding: '0.25rem 0.7rem', borderRadius: '20px', fontWeight: 600, color: !isInside ? 'var(--danger)' : 'var(--primary)', background: !isInside ? 'rgba(239,68,68,0.12)' : 'rgba(16,185,129,0.12)', border: `1px solid ${!isInside ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}` }}>
+                      {!isInside ? '⚠️ Outside' : '✅ Inside'}
                     </span>
                   </div>
                 </div>

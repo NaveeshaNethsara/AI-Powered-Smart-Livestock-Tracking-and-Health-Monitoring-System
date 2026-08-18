@@ -1,0 +1,117 @@
+# If you want to use this script, you need to go to the terminal and run the following command:
+# python predict.py image_name.file_type
+
+from pathlib import Path
+import sys
+
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
+
+
+
+
+BASE_DIR = Path(__file__).parent
+MODEL_PATH = BASE_DIR / "best_model.pth"
+
+
+# Load Checkpoint
+
+
+checkpoint = torch.load(
+    MODEL_PATH,
+    map_location="cpu"
+)
+
+classes = checkpoint["classes"]
+
+
+
+# Image Transform
+
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
+
+
+
+# Create Model
+
+
+model = models.resnet18(weights=None)
+
+model.fc = nn.Linear(
+    model.fc.in_features,
+    len(classes)
+)
+
+
+
+# Load Trained Weights
+
+
+model.load_state_dict(
+    checkpoint["model_state_dict"]
+)
+
+model.eval()
+
+print("Model loaded")
+
+
+
+# Get Image Path
+
+
+if len(sys.argv) < 2:
+    print("Usage: python predict.py image.jpg")
+    exit()
+
+image_path = sys.argv[1]
+
+
+
+# Load Image
+
+
+image = Image.open(image_path).convert("RGB")
+
+image = transform(image)
+
+image = image.unsqueeze(0)
+
+
+
+# Prediction
+
+
+with torch.no_grad():
+
+    output = model(image)
+
+    probabilities = torch.softmax(
+        output,
+        dim=1
+    )
+
+    confidence, prediction = torch.max(
+        probabilities,
+        1
+    )
+
+
+
+# Result
+
+
+print()
+
+print("Prediction:", classes[prediction.item()])
+
+print(
+    "Confidence:",
+    f"{confidence.item()*100:.2f}%"
+)
