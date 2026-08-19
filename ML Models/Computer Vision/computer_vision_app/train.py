@@ -34,31 +34,19 @@ val_transform = transforms.Compose([
 
 # Dataset
 
-import random
-from collections import defaultdict
 
-# Initialize separate train/validation datasets to apply separate transforms correctly
-train_dataset = datasets.ImageFolder(DATASET_DIR, transform=train_transform)
-val_dataset = datasets.ImageFolder(DATASET_DIR, transform=val_transform)
+full_dataset = datasets.ImageFolder(DATASET_DIR)
 
-# Perform stratified split (80% train, 20% validation per category)
-class_indices = defaultdict(list)
-for idx, (_, class_id) in enumerate(train_dataset.samples):
-    class_indices[class_id].append(idx)
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
 
-train_indices = []
-val_indices = []
+train_subset, val_subset = random_split(
+    full_dataset,
+    [train_size, val_size]
+)
 
-random.seed(42)
-for class_id, idxs in class_indices.items():
-    shuffled = list(idxs)
-    random.shuffle(shuffled)
-    split_point = int(0.8 * len(shuffled))
-    train_indices.extend(shuffled[:split_point])
-    val_indices.extend(shuffled[split_point:])
-
-train_subset = torch.utils.data.Subset(train_dataset, train_indices)
-val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+train_subset.dataset.transform = train_transform
+val_subset.dataset.transform = val_transform
 
 train_loader = DataLoader(
     train_subset,
@@ -72,7 +60,7 @@ val_loader = DataLoader(
     shuffle=False
 )
 
-classes = train_dataset.classes
+classes = full_dataset.classes
 num_classes = len(classes)
 
 print("Classes:", classes)
