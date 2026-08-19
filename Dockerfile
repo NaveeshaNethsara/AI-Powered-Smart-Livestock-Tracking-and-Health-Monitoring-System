@@ -14,7 +14,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Install Python ML requirements (CPU PyTorch to keep memory and size minimal)
+# Install Python ML requirements (CPU PyTorch to keep memory and size minimal andm)
 RUN pip3 install --no-cache-dir \
     numpy==1.26.4 \
     scikit-learn==1.3.2 \
